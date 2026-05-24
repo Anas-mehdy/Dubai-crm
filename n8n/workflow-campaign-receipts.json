@@ -1,0 +1,188 @@
+{
+  "name": "Campaign Delivery Receipt Handler — Evolution API",
+  "description": "Receives WhatsApp delivery status webhooks from Evolution API (sent → delivered → read). Updates campaign stats and campaign_leads timestamps in Supabase in real-time.",
+  "nodes": [
+    {
+      "id": "webhook-receipt",
+      "name": "Evolution Delivery Receipt Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [200, 300],
+      "parameters": {
+        "path": "messages-update",
+        "httpMethod": "POST",
+        "responseMode": "responseNode"
+      },
+      "notes": "Configure Evolution API to send MESSAGE_UPDATE events to this webhook URL."
+    },
+    {
+      "id": "extract-receipt",
+      "name": "Extract Receipt Data",
+      "type": "n8n-nodes-base.code",
+      "position": [420, 300],
+      "parameters": {
+        "jsCode": "// Evolution API sends MESSAGE_UPDATE events\n// event.data.key.id = whatsapp_message_id\n// event.data.update.status = 'DELIVERY_ACK' | 'READ' | 'PLAYED'\nconst body = $input.first().json.body || $input.first().json;\n\nconst event_type  = body.event || '';\nconst message_id  = body.data?.key?.id || '';\nconst raw_status  = body.data?.update?.status || '';\nconst remote_jid  = body.data?.key?.remoteJid || '';\nconst phone       = remote_jid.replace('@s.whatsapp.net', '').replace('@g.us', '');\n\n// Normalise status\nlet status = 'sent';\nif (raw_status === 'DELIVERY_ACK') status = 'delivered';\nelse if (raw_status === 'READ' || raw_status === 'PLAYED')         status = 'read';\nelse if (raw_status === 'ERROR')                                    status = 'failed';\n\nreturn [{ json: { event_type, message_id, phone, raw_status, status } }];"
+      }
+    },
+    {
+      "id": "filter-relevant",
+      "name": "Filter Message Update Events",
+      "type": "n8n-nodes-base.if",
+      "position": [640, 300],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.event_type }}",
+              "operation": "equal",
+              "value2": "messages.update"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "respond-ignore",
+      "name": "Respond 200 — Ignored Event",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [640, 480],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"status\": \"ignored\" }"
+      }
+    },
+    {
+      "id": "find-message",
+      "name": "Find Message in Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "position": [860, 300],
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "messages",
+        "filters": {
+          "conditions": [
+            { "keyName": "whatsapp_message_id", "condition": "eq", "keyValue": "={{ $json.message_id }}" }
+          ]
+        }
+      },
+      "notes": "Look up the message row using whatsapp_message_id to get lead_id."
+    },
+    {
+      "id": "check-message-found",
+      "name": "Message Found?",
+      "type": "n8n-nodes-base.if",
+      "position": [1080, 300],
+      "parameters": {
+        "conditions": {
+          "number": [
+            { "value1": "={{ $input.all().length }}", "operation": "largerEqual", "value2": 1 }
+          ]
+        }
+      }
+    },
+    {
+      "id": "update-message-status",
+      "name": "Update Message Status",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1300, 200],
+      "parameters": {
+        "operation": "update",
+        "tableId": "messages",
+        "id": "={{ $json.id }}",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldName": "status", "fieldValue": "={{ $('Extract Receipt Data').first().json.status }}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "find-campaign-lead",
+      "name": "Find campaign_leads Row",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1520, 200],
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "campaign_leads",
+        "filters": {
+          "conditions": [
+            { "keyName": "lead_id", "condition": "eq", "keyValue": "={{ $('Find Message in Supabase').first().json.lead_id }}" }
+          ]
+        },
+        "options": { "limit": 1 }
+      }
+    },
+    {
+      "id": "update-campaign-lead-timestamps",
+      "name": "Update campaign_leads Timestamps",
+      "type": "n8n-nodes-base.code",
+      "position": [1740, 200],
+      "parameters": {
+        "jsCode": "const status = $('Extract Receipt Data').first().json.status;\nconst clRow  = $('Find campaign_leads Row').first().json;\nif (!clRow?.id) return [];\n\n// TRICK: If Evolution API sends duplicate 'delivered' or 'read' events,\n// and we have already updated this timestamp in the database, return an empty array [].\n// In n8n, returning an empty array immediately halts the workflow branch and prevents downstream nodes from executing.\nif (status === 'delivered' && clRow.delivered_at) return [];\nif (status === 'read' && clRow.read_at) return [];\n\nconst fields = {};\nif (status === 'delivered') fields.delivered_at = new Date().toISOString();\nif (status === 'read')      fields.read_at      = new Date().toISOString();\n\nif (Object.keys(fields).length === 0) return [];\n\nreturn [{ json: { cl_id: clRow.id, campaign_id: clRow.campaign_id, status, fields } }];"
+      }
+    },
+    {
+      "id": "patch-campaign-lead",
+      "name": "Patch campaign_lead Row",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1960, 200],
+      "parameters": {
+        "operation": "update",
+        "tableId": "campaign_leads",
+        "id": "={{ $json.cl_id }}",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldName": "delivered_at", "fieldValue": "={{ $json.fields.delivered_at || undefined }}" },
+            { "fieldName": "read_at",      "fieldValue": "={{ $json.fields.read_at || undefined }}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "increment-stats",
+      "name": "Increment Campaign Delivery Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [2180, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/rpc/increment_campaign_stat",
+        "headers": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $vars.SUPABASE_ANON_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $vars.SUPABASE_ANON_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "body": {
+          "contentType": "json",
+          "body": "={\n  \"p_campaign_id\": \"{{ $('Update campaign_leads Timestamps').first().json.campaign_id }}\",\n  \"p_field\": \"{{ $('Extract Receipt Data').first().json.status === 'delivered' ? 'total_delivered' : 'total_read' }}\"\n}"
+        }
+      },
+      "notes": "Calls Postgres RPC to atomically increment total_delivered or total_read on the campaign row."
+    },
+    {
+      "id": "final-respond",
+      "name": "Respond 200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [2400, 300],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"status\": \"processed\" }"
+      }
+    }
+  ],
+  "connections": {
+    "Evolution Delivery Receipt Webhook":  { "main": [["Extract Receipt Data"]] },
+    "Extract Receipt Data":                { "main": [["Filter Message Update Events"]] },
+    "Filter Message Update Events":        { "main": [["Find Message in Supabase"], ["Respond 200 — Ignored Event"]] },
+    "Find Message in Supabase":            { "main": [["Message Found?"]] },
+    "Message Found?":                      { "main": [["Update Message Status"], ["Respond 200 OK"]] },
+    "Update Message Status":               { "main": [["Find campaign_leads Row"]] },
+    "Find campaign_leads Row":             { "main": [["Update campaign_leads Timestamps"]] },
+    "Update campaign_leads Timestamps":    { "main": [["Patch campaign_lead Row"]] },
+    "Patch campaign_lead Row":             { "main": [["Increment Campaign Delivery Stats"]] },
+    "Increment Campaign Delivery Stats":   { "main": [["Respond 200 OK"]] }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

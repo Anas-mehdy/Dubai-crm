@@ -1,0 +1,802 @@
+{
+  "name": "Campaign Sender — WhatsApp via Evolution API",
+  "description": "Triggered by the CRM when a campaign is launched. Responds immediately to CRM to prevent timeouts. Loops through matching leads with a Split-in-Batches loop, checks campaign status in Supabase in real-time to abort if 'paused', personalises each message, sends via Evolution API, and handles errors dynamically by pausing the campaign and logging events.",
+  "nodes": [
+    {
+      "id": "webhook-campaign-trigger",
+      "name": "Campaign Launch Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "path": "campaign-sender",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "notes": "CRM calls this when admin clicks 'Launch Campaign'. Body: { campaign_id, dry_run? }"
+    },
+    {
+      "id": "extract-campaign-id",
+      "name": "Extract Campaign ID",
+      "type": "n8n-nodes-base.set",
+      "position": [
+        420,
+        300
+      ],
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "campaign_id",
+              "value": "={{ $json.body.campaign_id }}"
+            },
+            {
+              "name": "dry_run",
+              "value": "={{ $json.body.dry_run || false }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "fetch-campaign",
+      "name": "Fetch Campaign from Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        640,
+        300
+      ],
+      "parameters": {
+        "operation": "get",
+        "tableId": "campaigns",
+        "id": "={{ $json.campaign_id }}"
+      },
+      "notes": "Gets name, message_template, message_template_ar, target_* filters, daily_send_limit"
+    },
+    {
+      "id": "validate-campaign",
+      "name": "Validate Campaign is Active",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        860,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equal",
+              "value2": "active"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "abort-not-active",
+      "name": "Abort — Campaign Not Active",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [
+        860,
+        480
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"error\": \"Campaign is not in active status\" }",
+        "options": {
+          "responseCode": 400
+        }
+      }
+    },
+    {
+      "id": "build-lead-query",
+      "name": "Build Lead Filter",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        1080,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// Pull campaign targeting rules\nconst campaign = $input.first().json;\n\n// We store these to pass forward\nreturn [{\n  json: {\n    campaign_id:        campaign.id,\n    campaign_name:      campaign.name,\n    template_en:        campaign.message_template,\n    template_ar:        campaign.message_template_ar,\n    daily_limit:        campaign.daily_send_limit || 33,\n    target_areas:       campaign.target_areas || [],\n    target_budgets:     campaign.target_budget_tiers || [],\n    target_intents:     campaign.target_intents || [],\n    target_nationalities: campaign.target_nationalities || [],\n    target_ptypes:      campaign.target_property_types || [],\n    dry_run:            $('Extract Campaign ID').first().json.dry_run,\n    run_timestamp:      new Date(campaign.updated_at).toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "fetch-leads",
+      "name": "Fetch Matching Leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        1300,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/campaign_leads?campaign_id=eq.{{ $('Build Lead Filter').first().json.campaign_id }}&sent_at=is.null&select=*,leads(*)",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headers": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.SUPABASE_ANON_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $vars.SUPABASE_ANON_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Fetches unsent leads linked to this campaign from campaign_leads junction table, including nested lead details."
+    },
+    {
+      "id": "filter-and-throttle",
+      "name": "Filter Leads & Apply Daily Limit",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        1520,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const params     = $('Build Lead Filter').first().json;\nconst rawRows    = $input.all().map(i => i.json);\n\nconst { target_areas, target_budgets, target_intents, target_nationalities, target_ptypes, daily_limit } = params;\n\n// Helper: if the target array is empty it means \"any\"\nconst match = (arr, val) => !arr || arr.length === 0 || arr.includes(val);\n\nconst allLeads = rawRows\n  .filter(row => row && row.leads)\n  .map(row => ({\n    ...row.leads,\n    junction_id: row.id,\n    variant: row.variant || 'A'\n  }));\n\nconst filtered = allLeads.filter(lead => {\n  return (\n    match(target_areas,         lead.area) &&\n    match(target_budgets,       lead.budget_tier) &&\n    match(target_intents,       lead.intent) &&\n    match(target_nationalities, lead.nationality) &&\n    match(target_ptypes,        lead.property_type) &&\n    lead.phone  // must have a phone\n  );\n});\n\n// Enforce daily send limit\nconst batch = filtered.slice(0, daily_limit);\n\n// Attach campaign meta to each lead item\nreturn batch.map(lead => ({ \n  json: {\n    lead_id:      lead.id,\n    lead_name:    lead.full_name,\n    phone:        lead.phone,\n    language:     lead.language || 'en',\n    template_en:  params.template_en,\n    template_ar:  params.template_ar,\n    campaign_id:  params.campaign_id,\n    campaign_name:params.campaign_name,\n    dry_run:      params.dry_run,\n    junction_id:  lead.junction_id,\n    variant:      lead.variant,\n    total_in_batch: batch.length\n  }\n}));"
+      }
+    },
+    {
+      "id": "loop-leads",
+      "name": "Loop Leads",
+      "type": "n8n-nodes-base.splitInBatches",
+      "position": [
+        1740,
+        300
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "notes": "Loops through matching leads one-by-one to personalize and apply safe rate-limit delays."
+    },
+    {
+      "id": "final-response",
+      "name": "Respond — Batch Started",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [
+        1740,
+        480
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"ok\",\n  \"campaign_id\": \"{{ $('Build Lead Filter').first().json.campaign_id }}\",\n  \"leads_targeted\": {{ $('Filter Leads & Apply Daily Limit').all().length }},\n  \"dry_run\": {{ $('Build Lead Filter').first().json.dry_run }}\n}"
+      },
+      "notes": "Responds immediately to the Next.js CRM so the user sees a success toast instantly and the request does not time out."
+    },
+    {
+      "id": "check-campaign-status",
+      "name": "Check Campaign Status",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        1960,
+        300
+      ],
+      "parameters": {
+        "operation": "get",
+        "tableId": "campaigns",
+        "id": "={{ $('Build Lead Filter').first().json.campaign_id }}"
+      },
+      "notes": "Queries the database to fetch the campaign's current real-time status during this loop iteration."
+    },
+    {
+      "id": "is-campaign-active",
+      "name": "Is Campaign Active?",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        2180,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equal",
+              "value2": "active"
+            }
+          ]
+        }
+      },
+      "notes": "Aborts the loop immediately if the admin clicked 'Pause' on the CRM, updating status to paused."
+    },
+    {
+      "id": "personalise-message",
+      "name": "Personalise Message",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        2400,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// Access the lead item directly from 'Loop Leads' node to avoid missing data from intervening nodes\nconst leadItem = $('Loop Leads').first().json;\n\n// Pick Arabic template if lead language is Arabic and Arabic template exists\nconst useArabic = leadItem.language === 'ar' && leadItem.template_ar;\nconst rawTemplate = useArabic ? leadItem.template_ar : leadItem.template_en;\n\n// 1. Process Spintax: {option1|option2|option3}\nfunction parseSpintax(text) {\n  if (!text) return '';\n  let parsed = text;\n  const spintaxRegex = /\\{([^{}]+?)\\}/g;\n  \n  let matchFound = true;\n  let iterations = 0;\n  while (matchFound && iterations < 10) {\n    matchFound = false;\n    parsed = parsed.replace(spintaxRegex, (match, choicesStr) => {\n      if (choicesStr.includes('|')) {\n        matchFound = true;\n        const choices = choicesStr.split('|');\n        const randomIndex = Math.floor(Math.random() * choices.length);\n        return choices[randomIndex];\n      }\n      return match;\n    });\n    iterations++;\n  }\n  return parsed;\n}\n\nconst spintaxParsed = parseSpintax(rawTemplate);\n\n// 2. Replace Placeholders: {lead_name} with full name, and {name} with first name\nconst fullName = leadItem.lead_name || 'Valued Customer';\nconst firstName = fullName.split(' ')[0];\n\nconst finalMessage = spintaxParsed\n  .replace(/\\{lead_name\\}/gi, fullName)\n  .replace(/\\{name\\}/gi, firstName);\n\nreturn [{\n  json: {\n    ...leadItem,\n    message_text: finalMessage\n  }\n}];"
+      }
+    },
+    {
+      "id": "skip-if-dry-run",
+      "name": "Skip Send if Dry Run",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        2620,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('Check Campaign Status').first().json.dry_run || $('Build Lead Filter').first().json.dry_run }}",
+              "operation": "equal",
+              "value2": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "send-whatsapp",
+      "name": "Send WhatsApp via Evolution API",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        2840,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.EVOLUTION_API_URL }}/message/sendText/{{ $vars.EVOLUTION_INSTANCE }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headers": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.EVOLUTION_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "body": {
+          "contentType": "json",
+          "body": "={\n  \"number\": \"{{ $json.phone }}@s.whatsapp.net\",\n  \"text\": {{ JSON.stringify($json.message_text) }},\n  \"delay\": 1500\n}"
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "notes": "Uses n8n Variables: EVOLUTION_API_URL, EVOLUTION_INSTANCE, EVOLUTION_API_KEY. Set these in n8n Settings > Variables."
+    },
+    {
+      "id": "wait-between-sends",
+      "name": "Rate Limit Delay (2s)",
+      "type": "n8n-nodes-base.wait",
+      "position": [
+        3060,
+        200
+      ],
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "notes": "Prevents Evolution API rate limiting. Adjust if needed."
+    },
+    {
+      "id": "log-message-sent",
+      "name": "Log Sent Message to Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        3280,
+        200
+      ],
+      "parameters": {
+        "operation": "create",
+        "tableId": "messages",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldName": "lead_id",
+              "fieldValue": "={{ $('Personalise Message').first().json.lead_id }}"
+            },
+            {
+              "fieldName": "direction",
+              "fieldValue": "outbound"
+            },
+            {
+              "fieldName": "content",
+              "fieldValue": "={{ $('Personalise Message').first().json.message_text }}"
+            },
+            {
+              "fieldName": "status",
+              "fieldValue": "sent"
+            },
+            {
+              "fieldName": "whatsapp_message_id",
+              "fieldValue": "={{ $('Send WhatsApp via Evolution API').first().json.body?.key?.id || '' }}"
+            },
+            {
+              "fieldName": "is_ai_generated",
+              "fieldValue": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "log-campaign-lead",
+      "name": "Log to campaign_leads Junction",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        3280,
+        380
+      ],
+      "parameters": {
+        "operation": "update",
+        "tableId": "campaign_leads",
+        "id": "={{ $('Personalise Message').first().json.junction_id }}",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldName": "sent_at",
+              "fieldValue": "={{ new Date().toISOString() }}"
+            }
+          ]
+        }
+      },
+      "notes": "Updates sent_at for the current campaign lead by its primary key junction_id."
+    },
+    {
+      "id": "increment-campaign-stats",
+      "name": "Increment Campaign total_sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        3500,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/rpc/increment_campaign_sent",
+        "headers": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.SUPABASE_ANON_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $vars.SUPABASE_ANON_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "body": {
+          "contentType": "json",
+          "body": "={ \"p_campaign_id\": \"{{ $('Personalise Message').first().json.campaign_id }}\" }"
+        }
+      },
+      "notes": "Calls a Postgres function to atomically increment total_sent. See SQL below in README."
+    },
+    {
+      "id": "dry-run-log",
+      "name": "Dry Run — Log Only",
+      "type": "n8n-nodes-base.set",
+      "position": [
+        2840,
+        420
+      ],
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "dry_run_result",
+              "value": "=WOULD SEND to {{ $json.phone }}: {{ $json.message_text }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "position": [
+        200,
+        600
+      ],
+      "parameters": {},
+      "notes": "Catches any node failure in the entire workflow and handles it gracefully."
+    },
+    {
+      "id": "pause-campaign-on-error",
+      "name": "Set Campaign to Paused",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        420,
+        600
+      ],
+      "parameters": {
+        "operation": "update",
+        "tableId": "campaigns",
+        "id": "={{ $('Extract Campaign ID').first().json.campaign_id }}",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldName": "status",
+              "fieldValue": "paused"
+            }
+          ]
+        }
+      },
+      "notes": "Instantly updates campaign status in database to 'paused' so the CRM dashboard reflects the error state."
+    },
+    {
+      "id": "log-campaign-error",
+      "name": "Log Campaign Error",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        640,
+        600
+      ],
+      "parameters": {
+        "operation": "create",
+        "tableId": "activity_log",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldName": "action",
+              "fieldValue": "campaign_error"
+            },
+            {
+              "fieldName": "entity_type",
+              "fieldValue": "campaign"
+            },
+            {
+              "fieldName": "entity_id",
+              "fieldValue": "={{ $('Extract Campaign ID').first().json.campaign_id }}"
+            },
+            {
+              "fieldName": "metadata",
+              "fieldValue": "={\"campaign_name\": \"{{ $('Fetch Campaign from Supabase').first()?.json?.name || 'Campaign' }}\", \"node\": \"{{ $json.node.name }}\", \"error\": \"{{ $json.error.message }}\", \"message\": \"Campaign paused automatically due to failure in node: {{ $json.node.name }}\"}"
+            }
+          ]
+        }
+      },
+      "notes": "Creates a premium audit record in activity_log detailing the error, node, and reason."
+    },
+    {
+      "id": "set-campaign-completed",
+      "name": "Set Campaign to Completed",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        1960,
+        480
+      ],
+      "parameters": {
+        "operation": "update",
+        "tableId": "campaigns",
+        "id": "={{ $('Extract Campaign ID').first().json.campaign_id }}",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldName": "status",
+              "fieldValue": "completed"
+            }
+          ]
+        }
+      },
+      "notes": "Instantly updates campaign status in database to 'completed' when all leads are processed."
+    },
+    {
+      "id": "log-campaign-completion",
+      "name": "Log Campaign Completion",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        2180,
+        480
+      ],
+      "parameters": {
+        "operation": "create",
+        "tableId": "activity_log",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldName": "action",
+              "fieldValue": "campaign_completed"
+            },
+            {
+              "fieldName": "entity_type",
+              "fieldValue": "campaign"
+            },
+            {
+              "fieldName": "entity_id",
+              "fieldValue": "={{ $('Extract Campaign ID').first().json.campaign_id }}"
+            },
+            {
+              "fieldName": "metadata",
+              "fieldValue": "={\"campaign_name\": \"{{ $('Fetch Campaign from Supabase').first()?.json?.name || 'Campaign' }}\", \"message\": \"Campaign completed successfully\"}"
+            }
+          ]
+        }
+      },
+      "notes": "Creates a completion record in activity_log."
+    }
+  ],
+  "connections": {
+    "Campaign Launch Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract Campaign ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Campaign ID": {
+      "main": [
+        [
+          {
+            "node": "Fetch Campaign from Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Campaign from Supabase": {
+      "main": [
+        [
+          {
+            "node": "Validate Campaign is Active",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Campaign is Active": {
+      "main": [
+        [
+          {
+            "node": "Build Lead Filter",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Abort — Campaign Not Active",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Lead Filter": {
+      "main": [
+        [
+          {
+            "node": "Fetch Matching Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Matching Leads": {
+      "main": [
+        [
+          {
+            "node": "Filter Leads & Apply Daily Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Leads & Apply Daily Limit": {
+      "main": [
+        [
+          {
+            "node": "Respond — Batch Started",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Loop Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Leads": {
+      "main": [
+        [
+          {
+            "node": "Check Campaign Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set Campaign to Completed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Campaign Status": {
+      "main": [
+        [
+          {
+            "node": "Is Campaign Active?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Campaign Active?": {
+      "main": [
+        [
+          {
+            "node": "Personalise Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Personalise Message": {
+      "main": [
+        [
+          {
+            "node": "Skip Send if Dry Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Send if Dry Run": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp via Evolution API",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dry Run — Log Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send WhatsApp via Evolution API": {
+      "main": [
+        [
+          {
+            "node": "Log to campaign_leads Junction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to campaign_leads Junction": {
+      "main": [
+        [
+          {
+            "node": "Log Sent Message to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Sent Message to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Increment Campaign total_sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment Campaign total_sent": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Delay (2s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit Delay (2s)": {
+      "main": [
+        [
+          {
+            "node": "Loop Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dry Run — Log Only": {
+      "main": [
+        [
+          {
+            "node": "Loop Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Campaign to Paused",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Campaign to Paused": {
+      "main": [
+        [
+          {
+            "node": "Log Campaign Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Campaign to Completed": {
+      "main": [
+        [
+          {
+            "node": "Log Campaign Completion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

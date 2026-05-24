@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# scratch files
+/scratch/
+/scratch_check.js
+/test_launch_api.js

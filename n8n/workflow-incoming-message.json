@@ -1,0 +1,743 @@
+{
+  "name": "WhatsApp Incoming Message Handler",
+  "description": "Receives incoming WhatsApp messages from Evolution API, filters inbound-only, finds leads, queries campaign history, fetches marketing campaign template context, qualifies leads using OpenAI with full campaign context, sends WhatsApp reply, logs outbound message, and alerts agents for HOT leads.",
+  "nodes": [
+    {
+      "id": "webhook-trigger",
+      "name": "Evolution Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [100, 300],
+      "parameters": {
+        "path": "messages-upsert",
+        "httpMethod": "POST",
+        "responseMode": "responseNode"
+      },
+      "notes": "Receives all messages.upsert events from Evolution API."
+    },
+    {
+      "id": "filter-inbound",
+      "name": "Filter Inbound Only",
+      "type": "n8n-nodes-base.if",
+      "position": [300, 300],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ !$json.body.data?.key?.fromMe }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ],
+          "string": [
+            {
+              "value1": "={{ $json.body.event }}",
+              "operation": "equal",
+              "value2": "messages.upsert"
+            }
+          ]
+        }
+      },
+      "notes": "Filters out outbound messages sent by us to prevent infinite loops, and only processes messages.upsert events."
+    },
+    {
+      "id": "respond-ignored",
+      "name": "Respond 200 — Ignored",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [300, 480],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"status\": \"ignored\" }"
+      }
+    },
+    {
+      "id": "extract-message",
+      "name": "Extract Message Data",
+      "type": "n8n-nodes-base.set",
+      "position": [500, 300],
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "sender_phone",
+              "value": "={{ ($json.body.data?.key?.remoteJid || '').replace('@s.whatsapp.net', '').replace('@g.us', '') }}"
+            },
+            {
+              "name": "message_text",
+              "value": "={{ $json.body.data?.message?.conversation || $json.body.data?.message?.extendedTextMessage?.text || '' }}"
+            },
+            {
+              "name": "message_id",
+              "value": "={{ $json.body.data?.key?.id }}"
+            },
+            {
+              "name": "instance_name",
+              "value": "={{ $json.body.instance }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "supabase-find-lead",
+      "name": "Find Lead in Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "position": [700, 300],
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "phone",
+              "condition": "eq",
+              "keyValue": "={{ $json.sender_phone }}"
+            }
+          ]
+        }
+      },
+      "notes": "Search for an existing lead in the CRM by their phone number."
+    },
+    {
+      "id": "lead-exists",
+      "name": "Lead Exists?",
+      "type": "n8n-nodes-base.if",
+      "position": [900, 300],
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $input.all().length }}",
+              "operation": "largerEqual",
+              "value2": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "no-op",
+      "name": "No Operation, do nothing",
+      "type": "n8n-nodes-base.noOp",
+      "position": [1100, 480],
+      "notes": "If lead does not exist in the CRM, exit immediately without replying or logging to protect user phone number."
+    },
+    {
+      "id": "find-campaign-lead",
+      "name": "Find Active Campaign Lead",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1100, 200],
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "campaign_leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "lead_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            }
+          ]
+        }
+      },
+      "notes": "Lookup if this lead has been sent any campaign messages across all campaigns."
+    },
+    {
+      "id": "handle-campaign-reply",
+      "name": "Handle Campaign Reply",
+      "type": "n8n-nodes-base.code",
+      "position": [1350, 200],
+      "parameters": {
+        "jsCode": "// Helper to safely locate the Lead Data from 'Find Lead in Supabase' even if n8n auto-renamed it on import\nfunction getLeadRow() {\n  const defaultName = 'Find Lead in Supabase';\n  try {\n    return $(defaultName).first().json;\n  } catch (e) {\n    // Try common auto-rename suffixes like 'Find Lead in Supabase 1', etc.\n    for (let i = 1; i <= 10; i++) {\n      try {\n        return $(`${defaultName} ${i}`).first().json;\n      } catch (err) {}\n      try {\n        return $(`${defaultName}${i}`).first().json;\n      } catch (err) {}\n    }\n    throw new Error('Could not find the node \"Find Lead in Supabase\" or any of its auto-renamed versions on your canvas. Please ensure it exists.');\n  }\n}\n\nconst leadRow = getLeadRow();\nconst clRows = $input.all().map(i => i.json);\n\n// Find the most recently sent campaign for this lead by sorting sent_at DESC\nconst sentCampaigns = clRows\n  .filter(row => row.sent_at !== null)\n  .sort((a, b) => new Date(b.sent_at) - new Date(a.sent_at));\n\nconst campaignSentRecord = sentCampaigns[0];\n\nif (campaignSentRecord) {\n  // Determine if this is the very first reply to this campaign\n  const isFirstReply = !campaignSentRecord.replied_at;\n  \n  return [{\n    json: {\n      lead_id: leadRow.id,\n      lead_name: leadRow.full_name,\n      phone: leadRow.phone,\n      lead_score: leadRow.lead_score || 0,\n      is_campaign_lead: true,\n      is_campaign_reply: isFirstReply,\n      campaign_lead_id: campaignSentRecord.id,\n      campaign_id: campaignSentRecord.campaign_id\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    lead_id: leadRow.id,\n    lead_name: leadRow.full_name,\n    phone: leadRow.phone,\n    lead_score: leadRow.lead_score || 0,\n    is_campaign_lead: false,\n    is_campaign_reply: false\n  }\n}];"
+      }
+    },
+    {
+      "id": "is-campaign-reply",
+      "name": "Is Campaign Reply?",
+      "type": "n8n-nodes-base.if",
+      "position": [1550, 200],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_campaign_reply }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "update-campaign-replied",
+      "name": "Set campaign_leads Replied",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1750, 100],
+      "parameters": {
+        "operation": "update",
+        "tableId": "campaign_leads",
+        "id": "={{ $json.campaign_lead_id }}",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldName": "replied_at",
+              "fieldValue": "={{ new Date().toISOString() }}"
+            }
+          ]
+        }
+      },
+      "notes": "Record the reply timestamp in the junction table."
+    },
+    {
+      "id": "increment-reply-stats",
+      "name": "Increment campaign_replied Stat",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [1950, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/rpc/increment_campaign_stat",
+        "headers": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.SUPABASE_ANON_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $vars.SUPABASE_ANON_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "body": {
+          "contentType": "json",
+          "body": "={\n  \"p_campaign_id\": \"{{ $('Handle Campaign Reply').first().json.campaign_id }}\",\n  \"p_field\": \"total_replied\"\n}"
+        }
+      },
+      "notes": "Increment the total_replied count atomically in the campaigns table."
+    },
+    {
+      "id": "log-message",
+      "name": "Log Message to Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "position": [2150, 200],
+      "parameters": {
+        "operation": "create",
+        "tableId": "messages",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldName": "lead_id",
+              "fieldValue": "={{ $('Handle Campaign Reply').first().json.lead_id }}"
+            },
+            {
+              "fieldName": "direction",
+              "fieldValue": "inbound"
+            },
+            {
+              "fieldName": "content",
+              "fieldValue": "={{ $('Extract Message Data').first().json.message_text }}"
+            },
+            {
+              "fieldName": "whatsapp_message_id",
+              "fieldValue": "={{ $('Extract Message Data').first().json.message_id }}"
+            },
+            {
+              "fieldName": "status",
+              "fieldValue": "read"
+            }
+          ]
+        }
+      },
+      "notes": "Logs the incoming message into the CRM's WhatsApp conversation history."
+    },
+    {
+      "id": "should-bot-reply",
+      "name": "Should Bot Reply?",
+      "type": "n8n-nodes-base.if",
+      "position": [2350, 200],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('Handle Campaign Reply').first().json.is_campaign_lead }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "notes": "Tricky check: Only activate AI bot responses for leads who have been sent a campaign message (across all campaigns)!"
+    },
+    {
+      "id": "get-campaign-details",
+      "name": "Get Campaign Details",
+      "type": "n8n-nodes-base.supabase",
+      "position": [2550, 100],
+      "parameters": {
+        "operation": "get",
+        "tableId": "campaigns",
+        "id": "={{ $('Handle Campaign Reply').first().json.campaign_id }}"
+      },
+      "notes": "Fetch the campaign template and details to give the AI Qualification Bot full context of what was sent to this lead."
+    },
+    {
+      "id": "language-detection",
+      "name": "Detect Language (OpenAI)",
+      "type": "n8n-nodes-base.openAi",
+      "position": [2750, 100],
+      "parameters": {
+        "operation": "message",
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a language detector for a Dubai real estate CRM. Detect if the message is in Arabic (respond 'ar') or English (respond 'en'). Respond with ONLY the language code."
+            },
+            {
+              "role": "user",
+              "content": "={{ $('Extract Message Data').first().json.message_text }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "qualification-bot",
+      "name": "AI Qualification Bot",
+      "type": "n8n-nodes-base.openAi",
+      "position": [2950, 100],
+      "parameters": {
+        "operation": "message",
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are a lead qualification assistant for a Dubai luxury real estate agency.\n\nRULES (HARD CONSTRAINTS):\n- NEVER quote any property prices\n- NEVER promise ROI or returns\n- NEVER make legal claims about property ownership\n- NEVER guarantee visa eligibility\n- Ask maximum 2-3 qualifying questions before handing off to human agent\n\nQUALIFICATION QUESTIONS (in order):\n1. Are you looking to buy, sell, rent, or invest?\n2. What area of Dubai are you interested in?\n3. What is your approximate budget range?\n\nAfter 3 questions, say: 'Thank you for your interest! I am connecting you with one of our specialist agents who will be able to assist you further.'\n\nIf Arabic is detected, respond in Gulf Arabic dialect.\n\nCONVERSATION CONTEXT:\nThe lead is replying to this initial marketing campaign message we sent them:\n\"{{ $('Get Campaign Details').first().json.message_template_ar && $('Detect Language (OpenAI)').first().json.choices[0].message.content.trim().toLowerCase() === 'ar' ? $('Get Campaign Details').first().json.message_template_ar : $('Get Campaign Details').first().json.message_template }}\"\n\nUse this initial message to understand what property, offer, or topic they are responding to. Keep your qualification extremely contextual and natural based on this initial message."
+            },
+            {
+              "role": "user",
+              "content": "={{ $('Extract Message Data').first().json.message_text }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "send-whatsapp-reply",
+      "name": "Send AI Reply via WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [3150, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.EVOLUTION_API_URL }}/message/sendText/{{ $vars.EVOLUTION_INSTANCE }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headers": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.EVOLUTION_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "body": {
+          "contentType": "json",
+          "body": "={\n  \"number\": \"{{ $('Handle Campaign Reply').first().json.phone }}@s.whatsapp.net\",\n  \"text\": {{ JSON.stringify($('AI Qualification Bot').first().json.choices[0].message.content) }},\n  \"delay\": 1000\n}"
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "notes": "Sends the AI-generated reply back to the user via Evolution API."
+    },
+    {
+      "id": "log-ai-message",
+      "name": "Log AI Response to Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "position": [3350, 100],
+      "parameters": {
+        "operation": "create",
+        "tableId": "messages",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldName": "lead_id",
+              "fieldValue": "={{ $('Handle Campaign Reply').first().json.lead_id }}"
+            },
+            {
+              "fieldName": "direction",
+              "fieldValue": "outbound"
+            },
+            {
+              "fieldName": "content",
+              "fieldValue": "={{ $('AI Qualification Bot').first().json.choices[0].message.content }}"
+            },
+            {
+              "fieldName": "status",
+              "fieldValue": "sent"
+            },
+            {
+              "fieldName": "whatsapp_message_id",
+              "fieldValue": "={{ $('Send AI Reply via WhatsApp').first().json.body?.key?.id || '' }}"
+            },
+            {
+              "fieldName": "is_ai_generated",
+              "fieldValue": true
+            }
+          ]
+        }
+      },
+      "notes": "Logs the AI qualification reply into the CRM's conversation history."
+    },
+    {
+      "id": "update-lead-ai-data",
+      "name": "Update Lead AI Data",
+      "type": "n8n-nodes-base.supabase",
+      "position": [3550, 100],
+      "parameters": {
+        "operation": "update",
+        "tableId": "leads",
+        "id": "={{ $('Handle Campaign Reply').first().json.lead_id }}",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldName": "language",
+              "fieldValue": "={{ $('Detect Language (OpenAI)').first().json.choices[0].message.content.trim().toLowerCase() }}"
+            }
+          ]
+        }
+      },
+      "notes": "Save detected language back to the CRM lead record."
+    },
+    {
+      "id": "check-hot-lead",
+      "name": "Check if HOT Lead",
+      "type": "n8n-nodes-base.if",
+      "position": [3750, 200],
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $('Handle Campaign Reply').first()?.json?.lead_score || 0 }}",
+              "operation": "largerEqual",
+              "value2": 80
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "hot-lead-alert",
+      "name": "Send HOT Lead Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [3950, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.EVOLUTION_API_URL }}/message/sendText/{{ $vars.EVOLUTION_INSTANCE }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headers": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.EVOLUTION_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "body": {
+          "contentType": "json",
+          "body": "={\n  \"number\": \"{{ $vars.AGENT_NOTIFICATION_NUMBER || '971501234567' }}@s.whatsapp.net\",\n  \"text\": \"🔥 *HOT Lead Qualified!*\\n\\n👤 *Name:* {{ $('Handle Campaign Reply').first().json.lead_name }}\\n📱 *Phone:* {{ $('Handle Campaign Reply').first().json.phone }}\\n📍 *Area:* {{ $('Handle Campaign Reply').first()?.json?.lead_area || 'Not specified' }}\\n🏠 *Property:* {{ $('Handle Campaign Reply').first()?.json?.lead_property_type || 'Not specified' }}\\n📈 *Score:* {{ $('Handle Campaign Reply').first().json.lead_score }} 🔥\\n💬 *Last Message:* \\\"{{ $('Extract Message Data').first().json.message_text }}\\\"\\n🔗 *Dashboard Link:* {{ $vars.CRM_BASE_URL || 'https://dubai-realestate-crm.com' }}/leads/{{ $('Handle Campaign Reply').first().json.lead_id }}\",\n  \"delay\": 1000\n}"
+        },
+        "options": {}
+      },
+      "notes": "Sends a direct WhatsApp notification via Evolution API to the configured agent phone number when a lead is scored >= 80."
+    },
+    {
+      "id": "respond-ok",
+      "name": "Respond 200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [4150, 200],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"status\": \"processed\" }"
+      }
+    }
+  ],
+  "connections": {
+    "Evolution Webhook": {
+      "main": [
+        [
+          {
+            "node": "Filter Inbound Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Inbound Only": {
+      "main": [
+        [
+          {
+            "node": "Extract Message Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 200 — Ignored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message Data": {
+      "main": [
+        [
+          {
+            "node": "Find Lead in Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Lead in Supabase": {
+      "main": [
+        [
+          {
+            "node": "Lead Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Exists?": {
+      "main": [
+        [
+          {
+            "node": "Find Active Campaign Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Active Campaign Lead": {
+      "main": [
+        [
+          {
+            "node": "Handle Campaign Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Campaign Reply": {
+      "main": [
+        [
+          {
+            "node": "Is Campaign Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Campaign Reply?": {
+      "main": [
+        [
+          {
+            "node": "Set campaign_leads Replied",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Message to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set campaign_leads Replied": {
+      "main": [
+        [
+          {
+            "node": "Increment campaign_replied Stat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment campaign_replied Stat": {
+      "main": [
+        [
+          {
+            "node": "Log Message to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Message to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Should Bot Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Bot Reply?": {
+      "main": [
+        [
+          {
+            "node": "Get Campaign Details",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Campaign Details": {
+      "main": [
+        [
+          {
+            "node": "Detect Language (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Language (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "AI Qualification Bot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Qualification Bot": {
+      "main": [
+        [
+          {
+            "node": "Send AI Reply via WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send AI Reply via WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Log AI Response to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log AI Response to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Update Lead AI Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Lead AI Data": {
+      "main": [
+        [
+          {
+            "node": "Check if HOT Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if HOT Lead": {
+      "main": [
+        [
+          {
+            "node": "Send HOT Lead Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send HOT Lead Alert": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

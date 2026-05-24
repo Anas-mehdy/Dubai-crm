@@ -1,0 +1,1180 @@
+{
+  "name": "WhatsApp Incoming Message Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "messages-upsert",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "1c5801a2-c1bf-4576-af96-2cbe171da47b",
+      "name": "Evolution Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [
+        -3456,
+        -96
+      ],
+      "typeVersion": 2.1,
+      "webhookId": "03bc81e9-7df4-4680-b9d5-0017aa297add",
+      "notes": "Receives all messages.upsert events from Evolution API."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b0326094-7ac5-4c6f-9d3c-52db15300a35",
+              "leftValue": "={{ !$json.body.data?.key?.fromMe }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "37159424-a6a7-4072-a53d-af71c1c822d9",
+      "name": "Filter Inbound Only",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        -3264,
+        -96
+      ],
+      "typeVersion": 2.3,
+      "notes": "Filters out outbound messages sent by us to prevent infinite loops, and only processes messages.upsert events."
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "6e02421d-6dbb-4deb-aea0-8a8dd4aa37e6",
+      "name": "Respond 200 — Ignored",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [
+        -3264,
+        96
+      ],
+      "typeVersion": 1.5
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cdd2c7c2-6adb-48fe-861f-643fb7b1dab0",
+              "name": "sender_phone",
+              "value": "={{ ($json.body.data?.key?.remoteJid || '').replace('@s.whatsapp.net', '').replace('@g.us', '') }}",
+              "type": "string"
+            },
+            {
+              "id": "9a1d17d5-2f40-4d64-852f-db22fe720a8b",
+              "name": "message_text\"",
+              "value": "={{ $json.body.data?.message?.conversation || $json.body.data?.message?.extendedTextMessage?.text || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "2381b30f-6634-430c-a107-7a470d34ce57",
+              "name": "message_id",
+              "value": "={{ $json.body.data?.key?.id }}",
+              "type": "string"
+            },
+            {
+              "id": "c0d75c74-64c0-4cf0-8cff-9fece5a01e6d",
+              "name": "instance_name",
+              "value": "={{ $json.body.instance }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ee736d5b-81db-4902-a110-9e552bac1474",
+      "name": "Extract Message Data",
+      "type": "n8n-nodes-base.set",
+      "position": [
+        -3056,
+        -96
+      ],
+      "typeVersion": 3.4
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "leads",
+        "returnAll": true,
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "phone",
+              "condition": "eq",
+              "keyValue": "={{ $json.sender_phone }}"
+            }
+          ]
+        }
+      },
+      "id": "85efc063-0422-428d-bef1-454fbe84d59c",
+      "name": "Find Lead in Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        -2608,
+        -112
+      ],
+      "typeVersion": 1,
+      "alwaysOutputData": false,
+      "credentials": {
+        "supabaseApi": {
+          "id": "zUABMpEOzsNJ9y6p",
+          "name": "dubai realestate"
+        }
+      },
+      "notes": "Search for an existing lead in the CRM by their phone number."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "8f048ce4-17a9-4ef6-a755-f5e0a5a47459",
+              "leftValue": "={{ $input.all().length }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1ca8948f-ff19-4edb-b34c-00ae50496a92",
+      "name": "Lead Exists?",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        -2320,
+        -112
+      ],
+      "typeVersion": 2.3
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "campaign_leads",
+        "returnAll": true,
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "lead_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            }
+          ]
+        }
+      },
+      "id": "0bb507ca-0286-46df-86c2-5e38955ee298",
+      "name": "Find Active Campaign Lead",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        -1936,
+        -160
+      ],
+      "typeVersion": 1,
+      "credentials": {
+        "supabaseApi": {
+          "id": "zUABMpEOzsNJ9y6p",
+          "name": "dubai realestate"
+        }
+      },
+      "notes": "Lookup if this lead has been sent any campaign messages across all campaigns."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Helper to safely locate the Lead Data from 'Find Lead in Supabase' even if n8n auto-renamed it on import\nfunction getLeadRow() {\n  const defaultName = 'Find Lead in Supabase';\n  try {\n    return $(defaultName).first().json;\n  } catch (e) {\n    // Try common auto-rename suffixes like 'Find Lead in Supabase 1', etc.\n    for (let i = 1; i <= 10; i++) {\n      try {\n        return $(`${defaultName} ${i}`).first().json;\n      } catch (err) {}\n      try {\n        return $(`${defaultName}${i}`).first().json;\n      } catch (err) {}\n    }\n    throw new Error('Could not find the node \"Find Lead in Supabase\" or any of its auto-renamed versions on your canvas. Please ensure it exists.');\n  }\n}\n\nconst leadRow = getLeadRow();\nconst clRows = $input.all().map(i => i.json);\n\n// Find the most recently sent campaign for this lead by sorting sent_at DESC\nconst sentCampaigns = clRows\n  .filter(row => row.sent_at !== null)\n  .sort((a, b) => new Date(b.sent_at) - new Date(a.sent_at));\n\nconst campaignSentRecord = sentCampaigns[0];\n\nif (campaignSentRecord) {\n  // Determine if this is the very first reply to this campaign\n  const isFirstReply = !campaignSentRecord.replied_at;\n  \n  return [{\n    json: {\n      lead_id: leadRow.id,\n      lead_name: leadRow.full_name,\n      phone: leadRow.phone,\n      lead_score: leadRow.lead_score || 0,\n      is_campaign_lead: true,\n      is_campaign_reply: isFirstReply,\n      campaign_lead_id: campaignSentRecord.id,\n      campaign_id: campaignSentRecord.campaign_id\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    lead_id: leadRow.id,\n    lead_name: leadRow.full_name,\n    phone: leadRow.phone,\n    lead_score: leadRow.lead_score || 0,\n    is_campaign_lead: false,\n    is_campaign_reply: false\n  }\n}];"
+      },
+      "id": "4ae47e49-9f77-44f1-94ad-b3ea355a157e",
+      "name": "Handle Campaign Reply",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -1696,
+        -160
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "f10ce11b-b4f4-428b-bb3d-a1eb33fc993b",
+              "leftValue": "={{ $json.is_campaign_reply }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3d38521b-7aea-4161-9ebd-c6678d325043",
+      "name": "Is Campaign Reply?",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        -1328,
+        -112
+      ],
+      "typeVersion": 2.3
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "campaign_leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.campaign_lead_id }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "replied_at",
+              "fieldValue": "={{ new Date().toISOString() }}"
+            }
+          ]
+        }
+      },
+      "id": "a74e8766-df7f-449a-87c3-49a8074a4f67",
+      "name": "Set campaign_leads Replied",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        -1120,
+        -208
+      ],
+      "typeVersion": 1,
+      "credentials": {
+        "supabaseApi": {
+          "id": "zUABMpEOzsNJ9y6p",
+          "name": "dubai realestate"
+        }
+      },
+      "notes": "Record the reply timestamp in the junction table."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://godcjnqsldnxwywfrefk.supabase.co/rest/v1/rpc/increment_campaign_stat",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "p_campaign_id",
+              "value": "={{ $('Handle Campaign Reply').first().json.campaign_id }}"
+            },
+            {
+              "name": "p_field",
+              "value": "total_replied"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ca0d2df6-d426-400d-9670-81c19e023aea",
+      "name": "Increment campaign_replied Stat",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        -928,
+        -208
+      ],
+      "typeVersion": 4.4,
+      "credentials": {
+        "supabaseApi": {
+          "id": "zUABMpEOzsNJ9y6p",
+          "name": "dubai realestate"
+        }
+      },
+      "notes": "Increment the total_replied count atomically in the campaigns table."
+    },
+    {
+      "parameters": {
+        "tableId": "messages",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "lead_id",
+              "fieldValue": "={{ $('Handle Campaign Reply').first().json.lead_id }}"
+            },
+            {
+              "fieldId": "direction",
+              "fieldValue": "inbound"
+            },
+            {
+              "fieldId": "content",
+              "fieldValue": "={{ $('Extract Message Data').item.json['message_text\"'] }}"
+            },
+            {
+              "fieldId": "whatsapp_message_id",
+              "fieldValue": "={{ $('Extract Message Data').first().json.message_id }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "read"
+            }
+          ]
+        }
+      },
+      "id": "3fab3954-8809-4fd7-8fb6-3c99f7771de9",
+      "name": "Log Message to Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        -704,
+        -112
+      ],
+      "typeVersion": 1,
+      "credentials": {
+        "supabaseApi": {
+          "id": "zUABMpEOzsNJ9y6p",
+          "name": "dubai realestate"
+        }
+      },
+      "notes": "Logs the incoming message into the CRM's WhatsApp conversation history."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d028aab6-ba2b-4931-9d7a-6283e810d1ca",
+              "leftValue": "={{ $('Handle Campaign Reply').first().json.is_campaign_lead }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d3cb8d4a-c850-4b72-817b-97b9aeb5e027",
+      "name": "Should Bot Reply?",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        256,
+        -112
+      ],
+      "typeVersion": 2.3,
+      "notes": "Tricky check: Only activate AI bot responses for leads who have been sent a campaign message (across all campaigns)!"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $('Handle Campaign Reply').first().json.lead_id }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "language",
+              "fieldValue": "={{ $json.output }}"
+            }
+          ]
+        }
+      },
+      "id": "b71b6335-389a-4a1a-ac73-2b56320a9bad",
+      "name": "Update Lead AI Data",
+      "type": "n8n-nodes-base.supabase",
+      "position": [
+        1296,
+        -352
+      ],
+      "typeVersion": 1,
+      "credentials": {
+        "supabaseApi": {
+          "id": "zUABMpEOzsNJ9y6p",
+          "name": "dubai realestate"
+        }
+      },
+      "notes": "Save detected language and status back to the CRM lead record."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "39064ee1-a8a6-407a-86be-91c0b4368474",
+              "leftValue": "={{ $('Handle Campaign Reply').item.json.lead_score }}",
+              "rightValue": 80,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "953fd1d4-77a9-4bfa-a244-5f7e550dd4a7",
+      "name": "Check if HOT Lead",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        1648,
+        -96
+      ],
+      "typeVersion": 2.3
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "bd2ae868-2158-4036-8981-288da2c0e060",
+      "name": "Respond 200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [
+        2048,
+        -112
+      ],
+      "typeVersion": 1.5
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        672,
+        304
+      ],
+      "id": "1f677e51-dbab-4f85-8e89-9393850b5e09",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "wKhpf0p1xu7ZFK9G",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Extract Message Data').item.json['message_text\"'] }}",
+        "options": {
+          "systemMessage": "=# ROLE\nYou are an elite, highly professional AI Qualification Assistant working for a luxury real estate agency in Dubai. Your sole purpose is to politely qualify cold outbound leads via WhatsApp within 2-3 contextual replies before smoothly handing the conversation over to a human property consultant.\n\n# AUTOMATIC LANGUAGE DETECTION & DYNAMIC RESPONSE\n- [cite_start]**CRITICAL**: Detect the language of the lead's reply instantly (e.g., English, Arabic, Russian, Chinese, French, Urdu, Hindi, etc.)[cite: 83, 151].\n- [cite_start]**MATCH INSTANTLY**: You MUST continue the entire conversation in the EXACT language used by the lead[cite: 84, 151]. [cite_start]Switching to the wrong language or staying in a default language will cause immediate client disengagement[cite: 84].\n- [cite_start]**ARABIC EXCEPTION**: If the lead speaks Arabic, NEVER use formal/classical Arabic (Fusha)[cite: 84]. [cite_start]You must reply in a natural, conversational Gulf Dialect (لهجة خليجية بيضاء تناسب مجتمع دبي)[cite: 84]. [cite_start]Use respectful local titles like \"أستاذ\" or \"أستاذة\" followed by their first name[cite: 54].\n- [cite_start]**OTHER LANGUAGES**: For English, Russian, Chinese, or any other language, maintain a highly professional, upscale, warm, and corporate tone suitable for High-Net-Worth Investors (HNWIs)[cite: 83, 151].\n\n# CORE OBJECTIVE & QUALIFICATION STEPPER\nYour goal is to extract exactly THREE pieces of information within a maximum of 2-3 questions:\n1. [cite_start]Intent: Is the user looking to Buy, Sell, Rent, or Invest? [cite: 41, 117]\n2. [cite_start]Budget Tier: What is their approximate budget range or investment size? [cite: 37, 76]\n3. [cite_start]Property Type / Area: What kind of property (Villa, Apartment, Penthouse) or community are they targeting? [cite: 37, 113]\n\n# CONVERSATION FLOW GUIDE\n- [cite_start]Step 1 (Initial Reply): Acknowledge their response with high empathy in their own language[cite: 80, 87]. Ask Question 1 (e.g., \"Are you looking for a residential home or a high-yield property investment?\").\n- Step 2 (Follow-up): Validate their answer. [cite_start]Seamlessly pivot to Question 2 (e.g., \"Excellent. To suggest the right inventory, what is your approximate target budget or investment size in your preferred currency or AED?\")[cite: 80].\n- [cite_start]Step 3 (Handoff Offer): Once they provide the details, OR after 3 total automated replies, stop asking questions[cite: 80]. [cite_start]Offer a human handoff (e.g., \"I am preparing our latest premium catalog for this range. May I have our area specialist contact you directly via WhatsApp or call?\")[cite: 80].\n\n# STRICT BOUNDARIES & CONSTRAINTS (ZERO TOLERANCE)\n1. [cite_start]❌ NEVER QUOTE PRICES: If asked about prices (e.g., \"How much is it?\", \"كم السعر؟\"), deflect politely: \"Prices vary based on layouts and specific launch details. Let me connect you with our community specialist to give you the exact current pricing.\" [cite: 87, 155]\n2. [cite_start]❌ NEVER PROMISE ROI OR YIELDS: If asked about returns, deflect: \"Our investment team can share historical data and projected net yields for this specific project during a quick call.\" [cite: 87, 155]\n3. [cite_start]❌ NEVER MAKE LEGAL OR OWNERSHIP CLAIMS: Avoid any talk about investor visas, corporate tax structures, or legal property registration laws[cite: 87, 155].\n4. [cite_start]❌ NO INTERROGATION: Never ask more than one question per message[cite: 80, 81]. Keep responses short (maximum 2-3 sentences). [cite_start]WhatsApp users hate long text blocks[cite: 81].\n5. [cite_start]❌ REJECTION HANDLING: If the lead says \"Not interested\", \"مو مهتم\", or any variation of opt-out, reply with extreme politeness and immediately close the bot: \"Thank you for your time. If you ever look into the Dubai market in the future, we are always here to help. Have a wonderful day.\" \n\n\n# CONTEXT & MEMORY\n- The lead is replying to this initial marketing campaign message we sent them: \"{{ $json.message_template }}\"\n- Recent Chat History: Here is the exact transcript of the last few messages for your reference:\n\"{{ $('Code in JavaScript').item.json.formatted_history }}\"\n\n# YOUR MISSION\nThe client just replied with: \"{{ $('Extract Message Data').item.json['message_text\"'] }}\". \nAnalyze the Current Campaign Context and the Recent Chat History above to know EXACTLY which property, villa, or investment project the client is asking about. \n\n# TONALLY COMPLIANT RESPONSE\nRespond directly to their reply based on the rules specified in your core instructions (Detect language, Dynamic response, Never quote prices, Switch to Gulf Arabic if they speak Arabic).\n\n# OUTPUT FORMAT\nGenerate only the direct response to be sent to the client on WhatsApp. Do not include any internal thinking, labels, or meta-text."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        848,
+        16
+      ],
+      "id": "54364197-ba65-4708-bbd6-51d2d5fc7f26",
+      "name": "AI Agent1"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -1968,
+        64
+      ],
+      "id": "081bbd1d-fcd4-4c59-af77-8fd37d898795",
+      "name": "No Operation, do nothing"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Extract Message Data').item.json['message_text\"'] }}",
+        "options": {
+          "systemMessage": "You are a language detector for a Dubai real estate CRM. Detect if the message is in Arabic (respond 'ar') or English (respond 'en') ...etc. Respond with ONLY the language code."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        896,
+        -368
+      ],
+      "id": "970db18b-b779-4629-96d6-e150de825804",
+      "name": "Detect Language (OpenAI)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. جلب سياق الحملة والرسالة الأخيرة بأمان (من أول عنصر قادم)\nconst firstItem = items.length > 0 ? items[0].json : {};\nconst currentCampaign = firstItem.current_campaign || \"No active marketing campaign\";\n\n// في حال كانت الرسالة الحالية الواصلة في الويبهوك محفوظة في حقل مخصص، وإلا نتركها فارغة للـ Agent\nconst clientReply = firstItem.last_message || \"\"; \n\n// 2. بناء سجل المحادثة من العناصر الخمسة بناءً على الحقول الحقيقية الظاهرة في الـ INPUT\nlet chatHistoryText = \"\";\n\nfor (let i = 0; i < items.length; i++) {\n    const msgJson = items[i].json;\n    \n    // التعديل الجوهري: القراءة من حقل content الظاهر في شاشتك\n    if (msgJson && msgJson.content) {\n        // تحديد المرسل بناءً على حقل direction (outbound = الشركة، inbound = العميل)\n        let sender = msgJson.direction === \"outbound\" ? \"الشركة (البوت/الحملة)\" : \"العميل\";\n        chatHistoryText += `[${sender}]: ${msgJson.content}\\n`;\n    }\n}\n\n// حماية في حال كانت كل النصوص فارغة\nif (chatHistoryText === \"\") {\n    chatHistoryText = \"لا يوجد رسائل سابقة في السجل.\";\n}\n\n// 3. إرجاع المخرج النهائي المدمج الموجه لنود الـ AI Agent\nreturn [{\n    json: {\n        current_campaign: currentCampaign,\n        formatted_history: chatHistoryText,\n        client_reply: clientReply\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        32,
+        -112
+      ],
+      "id": "833e7c6c-f0a4-4522-b982-d2eaac3873ac",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "messages",
+        "limit": 10,
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "lead_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.lead_id }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -352,
+        -112
+      ],
+      "id": "321f4b56-4473-4966-81a0-479c12cdcd60",
+      "name": "Supabase Get Lead",
+      "credentials": {
+        "supabaseApi": {
+          "id": "zUABMpEOzsNJ9y6p",
+          "name": "dubai realestate"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "keyValue": "={{ $('Supabase Get Lead').item.json.lead_id }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        448,
+        -304
+      ],
+      "id": "f3ea4631-c748-4ac3-9ee1-cfbbc0da5fa3",
+      "name": "is language detected?",
+      "credentials": {
+        "supabaseApi": {
+          "id": "zUABMpEOzsNJ9y6p",
+          "name": "dubai realestate"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "e3155d54-1ea6-4a62-aa1f-b20cee2a9df7",
+              "leftValue": "={{ $json.language }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        656,
+        -304
+      ],
+      "id": "c42e9fd3-98f2-4001-b130-e7d7791e3d21",
+      "name": "is language exist?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        832,
+        -560
+      ],
+      "id": "78eb04c5-3159-478b-9f70-93bd20c71b02",
+      "name": "No Operation, do nothing1"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "campaigns",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "keyValue": "={{ $('Handle Campaign Reply').item.json.campaign_id }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        464,
+        -112
+      ],
+      "id": "a89c6121-86ef-4d4c-b353-bcf3fcb8c4ed",
+      "name": "Get a row",
+      "credentials": {
+        "supabaseApi": {
+          "id": "zUABMpEOzsNJ9y6p",
+          "name": "dubai realestate"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Extract Message Data').item.json.sender_phone }}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.4,
+      "position": [
+        864,
+        224
+      ],
+      "id": "cff967e5-cc2e-47f2-9514-863ccc9d2db1",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://wa.picelmedia.online/message/sendText/tetsting3",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "DubaiRealestate2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ \nJSON.stringify({\n  number: \"905350215375\",\n  options: {\n    delay: 3000,\n    presence: \"composing\",\n    linkPreview: true\n  },\n  text: `🔥 [تنبيه ليد حار جداً - HOT LEAD] 🔥\n\n👤 اسم العميل: ${$('Handle Campaign Reply').item.json.lead_name}\n📱 رقم التواصل: ${$('Handle Campaign Reply').item.json.phone}\n🎯 السكور: ${$('Handle Campaign Reply').item.json.lead_score}\n\n💬 رسالة العميل الأخيرة: \"${$('Evolution Webhook').item.json.body.data.message.conversation}\"`\n}) \n}}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "ca579c4d-9cad-4173-b853-40cb786c1b62",
+      "name": "Send WhatsApp via Evolution API",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        1824,
+        -256
+      ],
+      "typeVersion": 4.4,
+      "notes": "Uses n8n Variables: EVOLUTION_API_URL, EVOLUTION_INSTANCE, EVOLUTION_API_KEY. Set these in n8n Settings > Variables."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://wa.picelmedia.online/chat/sendPresence/tetsting3\n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "DubaiRealestate2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"<string>\",\n  \"options\": {\n    \"delay\": 5000,\n    \"number\": \"<string>\"\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "9f7b900e-da63-4d91-8280-bd54957b6ac1",
+      "name": "Send WhatsApp via Evolution API1",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        1216,
+        16
+      ],
+      "typeVersion": 4.4,
+      "notes": "Uses n8n Variables: EVOLUTION_API_URL, EVOLUTION_INSTANCE, EVOLUTION_API_KEY. Set these in n8n Settings > Variables."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://wa.picelmedia.online/message/sendText/tetsting3",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "DubaiRealestate2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ \nJSON.stringify({\n  number: \"905350215375\",\n  options: {\n    delay: 3000,\n    presence: \"composing\",\n    linkPreview: true\n  },\n  text: `🔥 [تنبيه ليد حار جداً - HOT LEAD] 🔥\n\n👤 اسم العميل: ${$('Handle Campaign Reply').item.json.lead_name}\n📱 رقم التواصل: ${$('Handle Campaign Reply').item.json.phone}\n🎯 السكور: ${$('Handle Campaign Reply').item.json.lead_score}\n\n💬 رسالة العميل الأخيرة: \"${$('Evolution Webhook').item.json.body.data.message.conversation}\"`\n}) \n}}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "01135456-5be0-46c3-9693-27859c06d301",
+      "name": "Send WhatsApp via Evolution API2",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        1440,
+        16
+      ],
+      "typeVersion": 4.4,
+      "notes": "Uses n8n Variables: EVOLUTION_API_URL, EVOLUTION_INSTANCE, EVOLUTION_API_KEY. Set these in n8n Settings > Variables."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Evolution Webhook": {
+      "main": [
+        [
+          {
+            "node": "Filter Inbound Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Inbound Only": {
+      "main": [
+        [
+          {
+            "node": "Extract Message Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 200 — Ignored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message Data": {
+      "main": [
+        [
+          {
+            "node": "Find Lead in Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Lead in Supabase": {
+      "main": [
+        [
+          {
+            "node": "Lead Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Exists?": {
+      "main": [
+        [
+          {
+            "node": "Find Active Campaign Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Active Campaign Lead": {
+      "main": [
+        [
+          {
+            "node": "Handle Campaign Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Campaign Reply": {
+      "main": [
+        [
+          {
+            "node": "Is Campaign Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Campaign Reply?": {
+      "main": [
+        [
+          {
+            "node": "Set campaign_leads Replied",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Message to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set campaign_leads Replied": {
+      "main": [
+        [
+          {
+            "node": "Increment campaign_replied Stat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment campaign_replied Stat": {
+      "main": [
+        [
+          {
+            "node": "Log Message to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Message to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Supabase Get Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Bot Reply?": {
+      "main": [
+        [
+          {
+            "node": "is language detected?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get a row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Lead AI Data": {
+      "main": [
+        [
+          {
+            "node": "Check if HOT Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if HOT Lead": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp via Evolution API",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Detect Language (OpenAI)",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "AI Agent1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent1": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp via Evolution API1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Language (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Update Lead AI Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Should Bot Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase Get Lead": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "is language detected?": {
+      "main": [
+        [
+          {
+            "node": "is language exist?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "is language exist?": {
+      "main": [
+        [
+          {
+            "node": "Detect Language (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get a row": {
+      "main": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send WhatsApp via Evolution API1": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp via Evolution API2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send WhatsApp via Evolution API2": {
+      "main": [
+        [
+          {
+            "node": "Check if HOT Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "8f003411-87de-457a-aedf-991681061269",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "3627ba6daf2493916a6fceb2a3504fb1c7a7c5bdb98b4f0c08b1ab54ef103805"
+  },
+  "id": "KldPxVJ2dorC8ram",
+  "tags": []
+}
