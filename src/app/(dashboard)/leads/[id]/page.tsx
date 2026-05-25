@@ -507,7 +507,9 @@ export default function LeadDossierPage() {
                           <span>Updating...</span>
                         </div>
                       ) : (
-                        <SelectValue placeholder="Unassigned" />
+                        lead.assigned_agent_id 
+                          ? (agents.find(a => a.id === lead.assigned_agent_id)?.full_name || 'Assigned Agent') 
+                          : <SelectValue placeholder="Unassigned" />
                       )}
                     </SelectTrigger>
                     <SelectContent>
