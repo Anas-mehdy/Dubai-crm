@@ -31,9 +31,13 @@ const STATUS_CONFIG: Record<CampaignStatus, { label: string; className: string; 
 function DeliveryBar({ sent, delivered, read, replied }: { sent: number; delivered: number; read: number; replied: number }) {
   if (sent === 0) return <div className="h-1.5 rounded-full bg-muted/30 w-full" />;
 
+  // Ensure logical progression (a replied message must be read, and a read message must be delivered)
+  const logicalRead = Math.max(read, replied);
+  const logicalDelivered = Math.max(delivered, logicalRead);
+
   // Calculate net exclusive counts for progression states
-  const netDelivered = Math.max(0, delivered - read);
-  const netRead = Math.max(0, read - replied);
+  const netDelivered = Math.max(0, logicalDelivered - logicalRead);
+  const netRead = Math.max(0, logicalRead - replied);
   const netReplied = replied;
 
   return (
