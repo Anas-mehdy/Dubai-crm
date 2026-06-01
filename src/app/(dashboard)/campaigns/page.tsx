@@ -1236,6 +1236,43 @@ function CreateModal({ onClose, onCreate }: { onClose: () => void; onCreate: () 
 function CampaignDetailModal({ campaign, onClose, onRefresh }: { campaign: Campaign; onClose: () => void; onRefresh: () => void }) {
   const supabase = createClient();
   const cfg = STATUS_CONFIG[campaign.status];
+  const [userRole, setUserRole] = useState<string | null>(null);
+  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  useEffect(() => {
+    async function getUserRole() {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .single();
+        if (profile) {
+          setUserRole(profile.role);
+        }
+      }
+    }
+    getUserRole();
+  }, [supabase]);
+
+  const handleDeleteCampaign = async () => {
+    setIsDeleting(true);
+    const { error } = await supabase
+      .from('campaigns')
+      .delete()
+      .eq('id', campaign.id);
+
+    if (error) {
+      toast.error(`Failed to delete campaign: ${error.message}`);
+      setIsDeleting(false);
+    } else {
+      toast.success('Campaign deleted successfully');
+      onRefresh();
+      onClose();
+    }
+  };
 
   const updateStatus = async (status: CampaignStatus) => {
     if (status === 'active') {
@@ -1471,26 +1508,57 @@ function CampaignDetailModal({ campaign, onClose, onRefresh }: { campaign: Campa
         </div>
 
         {/* Actions */}
-        <div className="flex gap-2 p-6 shrink-0 border-t border-border/50">
-          {campaign.status === 'draft' && (
-            <Button className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white" onClick={() => updateStatus('active')}>
-              <Play className="w-4 h-4 mr-2" />Launch Campaign
-            </Button>
-          )}
-          {campaign.status === 'active' && (
-            <Button variant="outline" className="flex-1" onClick={() => updateStatus('paused')}>
-              <Pause className="w-4 h-4 mr-2" />Pause
-            </Button>
-          )}
-          {campaign.status === 'paused' && (
-            <Button className="flex-1" onClick={() => updateStatus('active')}>
-              <Play className="w-4 h-4 mr-2" />Resume
-            </Button>
-          )}
-          {(campaign.status === 'active' || campaign.status === 'paused') && (
-            <Button variant="outline" className="flex-1" onClick={() => updateStatus('completed')}>
-              <CheckCircle2 className="w-4 h-4 mr-2" />Mark Complete
-            </Button>
+        <div className="flex flex-col gap-3 p-6 shrink-0 border-t border-border/50">
+          {showConfirmDelete ? (
+            <div className="flex flex-col w-full gap-2 bg-destructive/10 border border-destructive/20 p-3 rounded-xl">
+              <p className="text-xs text-destructive-foreground font-medium text-center flex items-center justify-center gap-1.5">
+                <AlertCircle className="w-4 h-4 text-destructive" /> Are you sure? This will permanently delete the campaign and all its history.
+              </p>
+              <div className="flex gap-2 mt-1">
+                <Button variant="ghost" className="flex-1 text-xs h-8 hover:bg-muted/50" onClick={() => setShowConfirmDelete(false)} disabled={isDeleting}>
+                  Cancel
+                </Button>
+                <Button variant="destructive" className="flex-1 text-xs h-8 bg-red-600 hover:bg-red-700 text-white" onClick={handleDeleteCampaign} disabled={isDeleting}>
+                  {isDeleting ? 'Deleting...' : 'Yes, Delete Campaign'}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex gap-2 w-full">
+              {campaign.status === 'draft' && (
+                <Button className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white" onClick={() => updateStatus('active')}>
+                  <Play className="w-4 h-4 mr-2" />Launch Campaign
+                </Button>
+              )}
+              {campaign.status === 'active' && (
+                <Button variant="outline" className="flex-1" onClick={() => updateStatus('paused')}>
+                  <Pause className="w-4 h-4 mr-2" />Pause
+                </Button>
+              )}
+              {campaign.status === 'paused' && (
+                <Button className="flex-1" onClick={() => updateStatus('active')}>
+                  <Play className="w-4 h-4 mr-2" />Resume
+                </Button>
+              )}
+              {(campaign.status === 'active' || campaign.status === 'paused') && (
+                <Button variant="outline" className="flex-1" onClick={() => updateStatus('completed')}>
+                  <CheckCircle2 className="w-4 h-4 mr-2" />Mark Complete
+                </Button>
+              )}
+              
+              {/* Only show the Delete button to Admin or Developer */}
+              {(userRole === 'admin' || userRole === 'developer') && (
+                <Button 
+                  variant="destructive" 
+                  size="icon"
+                  className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 hover:border-red-500/30 w-10 shrink-0" 
+                  onClick={() => setShowConfirmDelete(true)}
+                  title="Delete Campaign"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              )}
+            </div>
           )}
         </div>
       </div>
